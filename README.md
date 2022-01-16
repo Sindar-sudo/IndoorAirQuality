@@ -1,7 +1,7 @@
 # IndoorAirQuality
 
 Wiring described in wiring.ino
-I used Firebeetle ESP32-E so wiring is according to that.
+I used Firebeetle ESP32-E so wiring is according to that. 
 
 Uses DHT22 and CCS811 to detect and display air quality in the room.
 Need to get a baseline for CCS811 first from https://github.com/Sindar-sudo/CSS811getbaseline
