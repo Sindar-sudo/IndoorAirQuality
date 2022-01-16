@@ -8,33 +8,40 @@
 #include <SPI.h>
 #include <Wire.h>
 #include <TFT_eSPI.h>       // Hardware-specific library
-#include <DHT.h>
 #include "Adafruit_CCS811.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 
-#define DHTPIN 4     // what pin DHT22 is connected to
+#include <DHT.h>
+#define DHTPIN 25     // what pin DHT22 is connected to
 #define DHTTYPE DHT22   // DHT 22  (AM2302)
 DHT dht(DHTPIN, DHTTYPE); //// Initialize DHT sensor
-Adafruit_CCS811 ccs; //co2&voc sensor
 
-//base
-float hum[10];  //Stores humidity value
-float temp[10]; //Stores temperature value
-int eCO2[10];
-int TVOC[10];
-unsigned int bkcolor = 0xF800; //initial background
-unsigned int frcolor = 0xFFFF; //text and icons
-unsigned int tempcolor, humcolor, cocolor, voccolor;
+
+
+Adafruit_CCS811 ccs; //co2&voc sensor
+uint16_t ccs811Baseline = 0x13C1; //set baseline for CO2/VOC measurements see getbaseline
 
 //variables for color calculations
 float tempave, humave, coave, vocave;
 float sum = 0;
 int loopcount = 0;
-const int totalloops = 10;
+const int totalloops = 60;
 byte yellow = 0, magenta = 0, blue = 0;
 unsigned int colour = yellow << 11;
+bool nanelem[totalloops]; //saves which value was nan if DHT22 fails to read data
+int nancount = 0; //counts the nan results from DHT22
+
+//base
+float hum[totalloops];  //Stores humidity value
+float temp[totalloops]; //Stores temperature value
+int eCO2[totalloops];
+int TVOC[totalloops];
+unsigned int bkcolor = 0xF800; //initial background
+unsigned int frcolor = 0xFFFF; //text and icons
+unsigned int tempcolor, humcolor, cocolor, voccolor;
+
 
 //constants for color changes
 const int templow = 16, tempok = 21, temphot = 27, tempcray = 32;
@@ -52,10 +59,10 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 
 TFT_eSPI tft = TFT_eSPI();
-
 bool screenon = true;
 
 void setup(void) {
+  dht.begin();
   tempcolor = humcolor = cocolor = voccolor = bkcolor;
 
   //all the network stuff
@@ -68,8 +75,7 @@ void setup(void) {
   tft.begin();
   tft.invertDisplay(0);
   tft.fillScreen(bkcolor);
-  tft.setRotation(3); //screen rotation
-  dht.begin();
+  tft.setRotation(1); //screen rotation
   if(!ccs.begin()){
     while(1);
   }
@@ -78,19 +84,26 @@ void setup(void) {
   
   DrawBase(); //draws base
   tft.loadFont(AA_FONT_SMALL); //loads the custom font
-  pinMode(27, INPUT_PULLUP); //prepare the button for turning the screen off
+  pinMode(0, INPUT_PULLUP); //prepare the button for turning the screen off
+  pinMode(17, OUTPUT); //for backlight control
+  digitalWrite(17, HIGH); //screen initially on via backlight control
+  memset(nanelem,false,totalloops); //reset array to false
 }
 
 
 void loop() {
   if(loopcount == totalloops) { 
     loopcount=0; //reset loopcount
-
     //calculate temperature color
     //my screen somehow has ranges of 0-31 on blue and yellow and 0-63 on magenta...
     sum = 0;
-    for (int i = 0; i < totalloops; i++) { sum += temp[i]; }
-    tempave = sum / totalloops;
+    for (int i = 0; i < totalloops; i++) {
+      if (nanelem[i] != true){ //if this temp was not nan then add to sum
+        sum += temp[i]; 
+        }
+      }
+    tempave = sum / totalloops - nancount;
+   
     if (tempave < templow){
       magenta = 0; //magenta
       blue = 31; //light blue
@@ -125,8 +138,12 @@ void loop() {
     
     //calculate humidity color
     sum = 0;
-    for (int i = 0; i < totalloops; i++) {sum += hum[i];}
-    humave = sum / totalloops;
+    for (int i = 0; i < totalloops; i++) {
+      if (nanelem[i] != true){ //if this hum was not nan then add to sum
+        sum += hum[i]; 
+        }
+      }
+    humave = sum / totalloops - nancount;
     if (humave < humlow){
       yellow = 31; //yellow
       magenta = map(humave, 0, humlow, 63, 0); //get more red if lower number
@@ -210,6 +227,9 @@ void loop() {
     //Serial.println(yellow);
     //Serial.println(magenta);
     //Serial.println(blue);
+
+    nancount = 0; //reset nancount after all calculations are done
+    memset(nanelem,false,totalloops); //reset array to false
     
     //draw all the colors
     tft.fillRect (0, 0, 80, 40, tempcolor);
@@ -256,23 +276,30 @@ void loop() {
     
   hum[loopcount] = dht.readHumidity();
   temp[loopcount]= dht.readTemperature();
+  if (isnan(temp[loopcount])) { //if temp reading is nan, 
+    nancount++;
+    nanelem[loopcount] = true;
+    }
+  ccs.setBaseline(ccs811Baseline); //set baseline for proper CO2/VOC measurements
   ccs.setEnvironmentalData(temp[loopcount], hum[loopcount]); //temperature and humidity info for co2&voc compensation
   ccs.readData();
   eCO2[loopcount] = ccs.geteCO2();
-  TVOC[loopcount] = ccs.getTVOC();
+  TVOC[loopcount] = ccs.getTVOC(); 
   tft.setTextColor(frcolor, bkcolor); // Set the font colour AND the background colour
 
   ShowData(); //draw data on screen  
   
-  int sensorVal = digitalRead(27);
+  int sensorVal = digitalRead(0);
   if (sensorVal == LOW) {
     if (screenon == true){
-    tft.writecommand(0x10); //turn off the screen if button is pressed
-    screenon = false;
+    //tft.writecommand(0x10); //old command, doesn't turn off the screen, but "sleeps" it, backlight still on 
+      digitalWrite(17, LOW); //turn off the screen via backlight control if button is pressed
+      screenon = false;
     }
     else {
-    tft.writecommand(0x11); //turn on the screen
-    screenon = true;
+      //tft.writecommand(0x11); 
+      digitalWrite(17, HIGH); //turn on the screen
+      screenon = true;
     }
   }
   
